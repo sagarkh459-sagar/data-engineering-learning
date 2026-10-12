@@ -1,0 +1,330 @@
+# SQL Practice Notes - CTEs, Aggregation, Window Functions, and Login Streaks
+
+
+## 1. Above-Average Earners
+
+### Question
+Use a CTE to compute the company-wide average salary, then list employees earning more than it.
+
+### Answer
+```sql
+WITH avgSalary AS (
+    SELECT AVG(salary) AS avg_salary
+    FROM employees
+)
+SELECT e.*
+FROM employees AS e
+CROSS JOIN avgSalary AS av
+WHERE e.salary > av.avg_salary;
+```
+
+### My notes
+- The CTE returns one row containing the company-wide average salary.
+- `CROSS JOIN` attaches that single value to every employee row.
+- The outer `WHERE` compares each employee's salary with the average.
+- A scalar subquery is another option.
+
+---
+
+## 2. High-Value Customers
+
+### Question
+Use a CTE to total order amount per customer, then keep only totals above 1,000.
+
+### Answer
+```sql
+WITH hvCust AS (
+    SELECT c.customer_id, c.name, SUM(o.amount) AS total_spend
+    FROM customers AS c
+    INNER JOIN orders AS o ON o.customer_id = c.customer_id
+    GROUP BY c.customer_id, c.name
+)
+SELECT *
+FROM hvCust
+WHERE total_spend > 1000;
+```
+
+### My notes
+- Join customers to orders using `customer_id`.
+- `GROUP BY` creates one result row per customer.
+- `SUM(o.amount)` calculates total spend.
+- The outer `WHERE` filters the aggregated CTE result.
+- A direct query using `HAVING SUM(o.amount) > 1000` is also possible.
+- Including both `customer_id` and `name` in `GROUP BY` is portable and clear.
+
+---
+
+## 3. Above Department Average
+
+### Question
+Create a CTE for average salary per department; list employees earning more than their own department's average.
+
+### Answer
+```sql
+WITH avgSalaryDept AS (
+    SELECT d.dept_id, d.dept_name, AVG(e.salary) AS dept_avg
+    FROM employees AS e
+    INNER JOIN departments AS d ON e.dept_id = d.dept_id
+    GROUP BY d.dept_id, d.dept_name
+)
+SELECT e.*, a.dept_avg
+FROM employees AS e
+INNER JOIN avgSalaryDept AS a ON e.dept_id = a.dept_id
+WHERE e.salary > a.dept_avg;
+```
+
+### My notes
+- The CTE calculates one average per department.
+- The join matches each employee to their own department's average.
+- Do not use `CROSS JOIN` here: it compares every employee with every department average.
+- Alternative: `AVG(salary) OVER (PARTITION BY dept_id)` preserves each employee row while adding the department average.
+
+---
+
+## 4. Monthly Revenue Share
+
+### Question
+Build a CTE of revenue per month, then show each month's percentage of the annual total.
+
+### Answer
+```sql
+WITH monthly_revenue AS (
+    SELECT YEAR(order_date) AS revenue_year,
+           MONTH(order_date) AS revenue_month,
+           SUM(amount) AS monthly_revenue
+    FROM orders
+    GROUP BY YEAR(order_date), MONTH(order_date)
+)
+SELECT revenue_year, revenue_month, monthly_revenue,
+       SUM(monthly_revenue) OVER (PARTITION BY revenue_year) AS annual_revenue,
+       monthly_revenue * 100.0
+         / NULLIF(SUM(monthly_revenue) OVER (PARTITION BY revenue_year), 0)
+         AS revenue_percentage
+FROM monthly_revenue
+ORDER BY revenue_year, revenue_month;
+```
+
+### My notes
+- First aggregate raw orders into monthly revenue.
+- `SUM(...) OVER (PARTITION BY revenue_year)` calculates annual total while preserving monthly rows.
+- `100.0` encourages decimal arithmetic.
+- `NULLIF(..., 0)` prevents division by zero.
+- Group by year and month when data spans multiple years.
+- `SUM(...) OVER (ORDER BY ...)` usually creates a running total; `SUM(...) OVER ()` calculates a total across all rows.
+
+---
+
+## 5. Find Duplicate Emails
+
+### Question
+Use a CTE to count occurrences of each email and return those appearing more than once.
+
+### Answer
+```sql
+WITH dupEmail AS (
+    SELECT email, COUNT(*) AS email_count
+    FROM customers
+    GROUP BY email
+)
+SELECT *
+FROM dupEmail
+WHERE email_count > 1;
+```
+
+### My notes
+- `GROUP BY email` creates one row per email.
+- `COUNT(*)` counts rows in each group.
+- The outer `WHERE` keeps emails that occur more than once.
+- `COUNT(email)` ignores NULL values; `COUNT(*)` counts rows even if email is NULL. Decide how NULLs should be treated.
+
+---
+
+## 6. Delete Duplicates, Keep Lowest ID
+
+### Question
+Use a CTE with `ROW_NUMBER()` to identify duplicate customer rows, keeping the lowest ID.
+
+### Answer — preview rows to keep
+```sql
+WITH rankedCustomers AS (
+    SELECT customer_id, name, email, signup_date,
+           ROW_NUMBER() OVER (
+               PARTITION BY email
+               ORDER BY customer_id
+           ) AS rn
+    FROM customers
+)
+SELECT customer_id, name, email, signup_date
+FROM rankedCustomers
+WHERE rn = 1;
+```
+
+### My notes
+- `PARTITION BY email` defines duplicates as rows sharing an email.
+- `ORDER BY customer_id` makes the lowest ID rank first.
+- `ROW_NUMBER()` assigns 1 to the row to keep in each email group.
+- This query only identifies rows to keep; it does not delete anything.
+- Before deleting, inspect rows with `rn > 1`, verify the duplicate rule, and use appropriate transaction/change-control procedures.
+- If NULL emails should not be considered duplicates, handle them explicitly.
+
+---
+
+## 7. Top 3 per Department — Include Ties
+
+### Question
+Return the three highest-paid employees in each department, including ties.
+
+### Answer
+```sql
+WITH rankedEmployees AS (
+    SELECT emp_id, name, dept_id, salary,
+           DENSE_RANK() OVER (
+               PARTITION BY dept_id
+               ORDER BY salary DESC
+           ) AS salary_rank
+    FROM employees
+)
+SELECT *
+FROM rankedEmployees
+WHERE salary_rank <= 3;
+```
+
+### My notes
+- `PARTITION BY dept_id` restarts ranking for each department.
+- `ORDER BY salary DESC` puts the highest salary first.
+- `DENSE_RANK()` gives equal salaries the same rank and does not skip the next rank.
+- `salary_rank <= 3` returns the top three distinct salary levels, including ties.
+- `ROW_NUMBER() <= 3` returns at most three rows per department and may exclude ties.
+
+---
+
+## 8. Month-over-Month Revenue Growth
+
+### Question
+Compute monthly revenue and the percentage change from the previous month.
+
+### Answer
+```sql
+WITH monthlyRevenue AS (
+    SELECT YEAR(order_date) AS revenue_year,
+           MONTH(order_date) AS revenue_month,
+           SUM(amount) AS monthly_revenue
+    FROM orders
+    GROUP BY YEAR(order_date), MONTH(order_date)
+),
+previousRevenue AS (
+    SELECT revenue_year, revenue_month, monthly_revenue,
+           LAG(monthly_revenue) OVER (
+               ORDER BY revenue_year, revenue_month
+           ) AS previous_month_revenue
+    FROM monthlyRevenue
+)
+SELECT revenue_year, revenue_month, monthly_revenue, previous_month_revenue,
+       (monthly_revenue - previous_month_revenue) * 100.0
+         / NULLIF(previous_month_revenue, 0) AS growth_percentage
+FROM previousRevenue
+ORDER BY revenue_year, revenue_month;
+```
+
+### My notes
+- CTE 1 aggregates orders to one row per year/month.
+- CTE 2 uses `LAG()` to bring the previous available month's revenue onto the current row.
+- Formula: `(current - previous) / previous * 100`.
+- The first row has no previous month, so growth is NULL.
+- `NULLIF` protects against a zero previous revenue.
+- Order by year/month, not revenue, to preserve chronology.
+- If months are missing, `LAG()` compares with the previous available row. Use a calendar/month table if every calendar month must be represented.
+
+---
+
+## 9. Consecutive Login Streaks
+
+### Question
+Find users who logged in on at least three consecutive days.
+
+Assume `logins(user_id, login_ts)` and SQL Server syntax.
+
+### Answer
+```sql
+WITH distinctLogins AS (
+    SELECT DISTINCT user_id, CAST(login_ts AS date) AS login_date
+    FROM logins
+),
+rankedLogins AS (
+    SELECT user_id, login_date,
+           ROW_NUMBER() OVER (
+               PARTITION BY user_id
+               ORDER BY login_date
+           ) AS rn
+    FROM distinctLogins
+),
+groupedLogins AS (
+    SELECT user_id, login_date,
+           DATEADD(DAY, -rn, login_date) AS group_key
+    FROM rankedLogins
+)
+SELECT user_id,
+       group_key,
+       COUNT(*) AS streak_days,
+       MIN(login_date) AS streak_start,
+       MAX(login_date) AS streak_end
+FROM groupedLogins
+GROUP BY user_id, group_key
+HAVING COUNT(*) >= 3
+ORDER BY user_id, streak_start;
+```
+
+### My notes
+- Remove duplicate logins on the same day for each user.
+- `ROW_NUMBER()` numbers each user's distinct dates chronologically.
+- Subtracting the row number in days creates a grouping key.
+- Consecutive dates share the same key because date and row number both increase by one.
+- Group by user and key; `HAVING COUNT(*) >= 3` keeps streaks of at least three days.
+- This returns each qualifying streak, not just user IDs.
+- SQL Server uses `CAST(... AS date)` and `DATEADD()`.
+
+---
+
+## 10. CTE vs Subquery vs Temp Table vs View
+
+### Question
+Explain differences in scope, reusability, and performance. When would you choose each?
+
+### My notes
+- **CTE:** A named query step used by one statement. Good for readability, staged calculations, and recursive queries.
+- **Subquery:** A query nested inside another query. Good for a small, local calculation.
+- **Temp table:** Stores intermediate rows for reuse across statements in its supported scope. Can be indexed; creating/populating it has overhead.
+- **View:** A saved query definition reusable by different queries/users. A standard view usually does not store result rows itself.
+- **Performance:** Do not assume a CTE is faster than a subquery or that a view is precomputed. Check execution plans and measure real workloads.
+
+---
+
+# General SQL Problem-Solving Checklist
+
+Before writing SQL, ask:
+
+1. What does the business question actually ask?
+2. What should one output row represent (the result's grain)?
+3. Which tables contain the data, and what are their keys?
+4. Do I need joins? Could the join multiply rows?
+5. Do I filter rows (`WHERE`) or groups (`HAVING`)?
+6. Do I need aggregation (`GROUP BY`) or a window function that preserves rows?
+7. Do I need multiple logical stages? Consider CTEs.
+8. What should happen with NULLs, duplicate records, ties, and missing dates?
+9. Can I validate row counts, totals, and sample records manually?
+10. If modifying data, have I previewed affected rows and ensured the operation is safe?
+11. If performance matters, have I checked the execution plan and indexes?
+
+## Patterns to remember
+
+- Total per group → `GROUP BY` + `SUM()`
+- Filter aggregate results → `HAVING`, or aggregate in a CTE then outer `WHERE`
+- Compare row with group average → `AVG() OVER (PARTITION BY ...)`
+- Previous row → `LAG()`
+- Top N with ties → `RANK()` / `DENSE_RANK()`
+- Top N exact rows → `ROW_NUMBER()`
+- Percentage of total → `value * 100.0 / SUM(value) OVER (...)`
+- Duplicates → `GROUP BY ... HAVING COUNT(*) > 1`
+- Consecutive dates → gaps-and-islands pattern with date and row number
+
+
